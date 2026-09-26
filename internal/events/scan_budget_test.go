@@ -315,3 +315,65 @@ func TestReadNewestBoundedSkipsSupplementalArchiveAboveCursor(t *testing.T) {
 		t.Fatalf("reachedSeq = %d, want 3", reachedSeq)
 	}
 }
+
+// TestReadNewestBoundedSkipsRotatingTwinOfListedArchive pins that a
+// .rotating-* file left behind in the crash window between archive rename and
+// source removal is not read alongside its canonical archive: both hold the
+// same seqs, so reading both would duplicate them on the page.
+func TestReadNewestBoundedSkipsRotatingTwinOfListedArchive(t *testing.T) {
+	dir, _ := seedThreeArchives(t)
+	path := filepath.Join(dir, "events.jsonl")
+	writeJSONLEvents(t, filepath.Join(dir, "events.jsonl.rotating-20260507T120500Z-seq-3-4"), 3, 4)
+
+	got, truncated, _, err := readNewestBounded(context.Background(), path, Filter{}, 10, 1<<30)
+	if err != nil {
+		t.Fatalf("readNewestBounded: %v", err)
+	}
+	if truncated {
+		t.Errorf("truncated = true, want false")
+	}
+	if gotSeqs := seqsOf(got); !reflect.DeepEqual(gotSeqs, []uint64{1, 2, 3, 4, 5, 6}) {
+		t.Fatalf("seqs = %v, want [1 2 3 4 5 6] (rotating twin of a listed archive must not duplicate its seqs)", gotSeqs)
+	}
+}
+
+// TestReadNewestBoundedReadsSupplementalTwinOnce pins that an archive
+// promoted between the two listings, whose rotating twin also still exists,
+// reaches the page once: the twin and the archive share a seq window inside
+// the supplemental tier.
+func TestReadNewestBoundedReadsSupplementalTwinOnce(t *testing.T) {
+	dir, _ := seedThreeArchives(t)
+	path := filepath.Join(dir, "events.jsonl")
+
+	var stderr bytes.Buffer
+	promoted := false
+	previous := readRotationDir
+	t.Cleanup(func() { readRotationDir = previous })
+	readRotationDir = func(name string) ([]os.DirEntry, error) {
+		if !promoted {
+			promoted = true
+			src := filepath.Join(dir, "late.jsonl")
+			writeJSONLEvents(t, src, 7, 8)
+			dest := filepath.Join(dir, formatArchiveBasename(time.Date(2026, 5, 7, 12, 15, 0, 0, time.UTC), 7, 8))
+			if err := gzipAndArchive(src, dest, &stderr); err != nil {
+				t.Fatalf("gzip late archive: %v", err)
+			}
+			writeJSONLEvents(t, filepath.Join(dir, "events.jsonl.rotating-20260507T121500Z-seq-7-8"), 7, 8)
+		}
+		return previous(name)
+	}
+
+	got, truncated, _, err := readNewestBounded(context.Background(), path, Filter{}, 20, 1<<30)
+	if err != nil {
+		t.Fatalf("readNewestBounded: %v", err)
+	}
+	if !promoted {
+		t.Fatal("supplemental listing hook never ran")
+	}
+	if truncated {
+		t.Errorf("truncated = true, want false")
+	}
+	if gotSeqs := seqsOf(got); !reflect.DeepEqual(gotSeqs, []uint64{1, 2, 3, 4, 5, 6, 7, 8}) {
+		t.Fatalf("seqs = %v, want [1 2 3 4 5 6 7 8] (supplemental archive and its rotating twin read once)", gotSeqs)
+	}
+}

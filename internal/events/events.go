@@ -622,7 +622,9 @@ type InFlightProvider interface {
 // once either fetch matches are found or a provider-configured byte budget
 // is exhausted, returning a truncated signal and a resume boundary instead
 // of continuing to scan. Providers with bounded or already-indexed history
-// (in-memory fakes, exec scripts) need not implement it.
+// (in-memory fakes, exec scripts) need not implement it. Implementers must
+// also implement [TailProvider]: ListNewestBounded never reads the active
+// file and relies on ListTail having covered it.
 type BoundedScanProvider interface {
 	// ListNewestBounded returns up to fetch of filter's newest-Seq matches,
 	// in ascending Seq order. truncated is true only when the scan stopped

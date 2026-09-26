@@ -64,22 +64,36 @@ func readNewestBounded(ctx context.Context, path string, filter Filter, fetch in
 			matches = matches[len(matches)-need:]
 		}
 		for i := len(matches) - 1; i >= 0; i-- {
+			// The walk is strictly descending, so a seq at or above the
+			// last one appended is a duplicate from an overlapping source.
+			if n := len(newestFirst); n > 0 && matches[i].Seq >= newestFirst[n-1].Seq {
+				continue
+			}
 			newestFirst = append(newestFirst, matches[i])
 		}
 	}
 
+	// seen holds the seq windows this pass has already read: an archive and
+	// its not-yet-removed rotating twin share a window and hold the same
+	// seqs, so only the first one reached is read.
+	seen := make(map[eventSeqWindow]struct{}, len(supplemental))
 	for i := len(supplemental) - 1; i >= 0 && len(newestFirst) < fetch; i-- {
 		src := supplemental[i]
-		if src.kind == sourceArchive {
-			if _, ok := listedArchives[eventSeqWindow{first: src.firstSeq, last: src.lastSeq}]; ok {
-				continue // already covered by the base archives snapshot below
-			}
-			// Same cursor guard as the base loop: an archive wholly outside
-			// the filter's window must neither spend the first-archive
-			// allowance nor mint a resume boundary at or above BeforeSeq.
-			if !archiveOverlapsFilter(archiveInfo{FirstSeq: src.firstSeq, LastSeq: src.lastSeq}, filter) {
-				continue
-			}
+		window := eventSeqWindow{first: src.firstSeq, last: src.lastSeq}
+		// Any source whose window the base archives snapshot covers is
+		// redundant: for an archive it IS that archive, and for a rotating
+		// file it is the archive's twin. Mirrors readRotationSources.
+		if _, ok := listedArchives[window]; ok {
+			continue
+		}
+		if _, ok := seen[window]; ok {
+			continue
+		}
+		// Same cursor guard as the base loop: a source wholly outside the
+		// filter's window must neither spend the first-archive allowance
+		// nor mint a resume boundary at or above BeforeSeq.
+		if !archiveOverlapsFilter(archiveInfo{FirstSeq: src.firstSeq, LastSeq: src.lastSeq}, filter) {
+			continue
 		}
 		if cerr := ctx.Err(); cerr != nil {
 			return nil, false, 0, cerr
@@ -91,6 +105,7 @@ func readNewestBounded(ctx context.Context, path string, filter Filter, fetch in
 		if rerr != nil {
 			return reverseEvents(newestFirst), false, 0, fmt.Errorf("reading %q: %w", filepath.Base(src.path), rerr)
 		}
+		seen[window] = struct{}{}
 		appendNewestTail(matches, fetch-len(newestFirst))
 	}
 
