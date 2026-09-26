@@ -105,10 +105,7 @@ jobs:
           mkdir -p /tmp/gc-test-home
           echo "HOME=/tmp/gc-test-home" >> "$GITHUB_ENV"
 
-      - name: bazel build //...
-        run: bazel --output_user_root="$RUNNER_TEMP"/bazel-outputs build //... $( [ -f .bazelrc.local ] && echo --config=remote-exec )
-
-      - name: bazel test //...
+      - name: bazel test //... (build subsumed)
         run: |
           ARGS=(--output_user_root="$RUNNER_TEMP"/bazel-outputs)
           PROFILE=(--profile=/tmp/bazel-profile.json)
