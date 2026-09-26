@@ -222,3 +222,84 @@ func TestEventListBoundedScanFullWalkNoGapNoDup(t *testing.T) {
 		}
 	}
 }
+
+// rotatedBetweenReadsProvider models a rotation landing between ListTail and
+// ListNewestBounded: the tail still sees the active band (Seq >= activeFloor),
+// but by the time the bounded scan runs those same rows have been promoted
+// into an archive it can read. Its ListNewestBounded honors only the caller's
+// BeforeSeq, so without a fence below the tail it re-serves the tail's rows.
+type rotatedBetweenReadsProvider struct {
+	*events.Fake
+	activeFloor uint64
+}
+
+func (p *rotatedBetweenReadsProvider) ListTail(filter events.Filter, limit int) ([]events.Event, error) {
+	all, err := p.List(filter)
+	if err != nil {
+		return nil, err
+	}
+	var active []events.Event
+	for _, e := range all {
+		if e.Seq >= p.activeFloor {
+			active = append(active, e)
+		}
+	}
+	if limit > 0 && len(active) > limit {
+		active = active[len(active)-limit:]
+	}
+	return active, nil
+}
+
+func (p *rotatedBetweenReadsProvider) ListNewestBounded(_ context.Context, filter events.Filter, fetch int) ([]events.Event, bool, uint64, error) {
+	all, err := p.List(filter) // ascending Seq, respects BeforeSeq only
+	if err != nil {
+		return nil, false, 0, err
+	}
+	if len(all) > fetch {
+		all = all[len(all)-fetch:]
+	}
+	return all, false, 0, nil
+}
+
+// TestEventListBoundedScanFencedBelowTail pins that the bounded scan is
+// fenced at the oldest tail row, so a rotation between the two reads cannot
+// return any seq twice.
+func TestEventListBoundedScanFencedBelowTail(t *testing.T) {
+	state := newFakeState(t)
+	fake := events.NewFake()
+	state.eventProv = &rotatedBetweenReadsProvider{Fake: fake, activeFloor: 13}
+	h := newTestCityHandler(t, state)
+	for i := 0; i < 15; i++ {
+		fake.Record(events.Event{Type: "e.t", Actor: "a"})
+	}
+
+	seen := map[uint64]int{}
+	cursor := ""
+	for pages := 0; ; pages++ {
+		if pages > 4 {
+			t.Fatal("walk did not terminate")
+		}
+		url := cityURL(state, "/events?limit=10")
+		if cursor != "" {
+			url += "&cursor=" + cursor
+		}
+		items, _, next := decodeEventList(t, getList(t, h, url))
+		for _, e := range items {
+			seen[e.Seq]++
+		}
+		if pages == 0 {
+			if len(items) != 10 || items[0].Seq != 15 || items[9].Seq != 6 {
+				t.Fatalf("first page = %d items, want 10 spanning [15..6]", len(items))
+			}
+		}
+		if next == "" {
+			break
+		}
+		cursor = next
+	}
+	for seq := uint64(1); seq <= 15; seq++ {
+		if seen[seq] != 1 {
+			t.Errorf("seq %d seen %d times, want exactly 1", seq, seen[seq])
+		}
+	}
+}

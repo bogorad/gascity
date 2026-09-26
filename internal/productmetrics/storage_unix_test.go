@@ -3678,6 +3678,39 @@ func TestStorageAdvisoryLockUsesStableInodeAndHonorsContext(t *testing.T) {
 	}
 }
 
+func TestStorageTryUploaderLockDistinguishesFreeAndContended(t *testing.T) {
+	inspection := inspectStorageTestHome(t, true)
+	firstRoot, err := openStorageRootMutable(inspection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = firstRoot.Close() }()
+	secondRoot, err := openStorageRootMutable(inspection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = secondRoot.Close() }()
+
+	first, acquired, err := firstRoot.tryAcquireUploaderLock()
+	if err != nil || !acquired {
+		t.Fatalf("first tryAcquireUploaderLock = (%v, %v), want acquired", acquired, err)
+	}
+	second, acquired, err := secondRoot.tryAcquireUploaderLock()
+	if err != nil || acquired || second != nil {
+		t.Fatalf("contended tryAcquireUploaderLock = (%v, %v, %v), want no lock and no error", second, acquired, err)
+	}
+	if err := first.Release(); err != nil {
+		t.Fatal(err)
+	}
+	second, acquired, err = secondRoot.tryAcquireUploaderLock()
+	if err != nil || !acquired {
+		t.Fatalf("tryAcquireUploaderLock after release = (%v, %v), want acquired", acquired, err)
+	}
+	if err := second.Release(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestStorageCloseRacesOperationsWithTypedClosedResult(t *testing.T) {
 	inspection := inspectStorageTestHome(t, true)
 	seed, err := openStorageRootMutable(inspection)
@@ -3797,6 +3830,10 @@ func TestStorageAdvisoryLockRejectsHardlinkAndSymlink(t *testing.T) {
 func TestStorageAdvisoryLockIsReleasedWhenProcessDies(t *testing.T) {
 	inspection := inspectStorageTestHome(t, true)
 	cmd := exec.Command(os.Args[0], "-test.run=^TestStorageLockHolderHelper$", "--", "--productmetrics-lock-holder", inspection.Home().Path())
+	// Re-exec'd helpers must not inherit bazel's shard filter: the go test
+	// runner would assign the helper to a different shard and exit "PASS"
+	// without running it (#6638).
+	cmd.Env = shardFreeEnv()
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -3823,7 +3860,7 @@ func TestStorageAdvisoryLockIsReleasedWhenProcessDies(t *testing.T) {
 		if err != nil {
 			t.Fatalf("lock helper: %v", err)
 		}
-	case <-time.After(testutil.ExecRaceTimeout):
+	case <-time.After(hangBudget):
 		t.Fatal("timed out waiting for lock helper")
 	}
 	root, err := openStorageRootMutable(inspection)
@@ -3925,4 +3962,19 @@ func TestParseStorageLockHolderArgsRequiresExactSuffix(t *testing.T) {
 			}
 		})
 	}
+}
+
+// shardFreeEnv returns the current environment without bazel's test-shard
+// filter variables, for re-exec'd helper binaries that select work via
+// -test.run instead of shard assignment.
+func shardFreeEnv() []string {
+	out := make([]string, 0, len(os.Environ()))
+	for _, kv := range os.Environ() {
+		name, _, _ := strings.Cut(kv, "=")
+		if name == "TEST_SHARD_INDEX" || name == "TEST_TOTAL_SHARDS" {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }

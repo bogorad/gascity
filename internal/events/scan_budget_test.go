@@ -235,3 +235,83 @@ func TestFileRecorderListNewestBoundedUsesConfiguredBudget(t *testing.T) {
 		t.Fatalf("ListNewestBounded seqs = %v, want [5 6]", gotSeqs)
 	}
 }
+
+func TestReadNewestBoundedCursorInsideArchiveClampsAndResumesWithoutOverlap(t *testing.T) {
+	dir, _ := seedThreeArchives(t)
+	path := filepath.Join(dir, "events.jsonl")
+	ctx := context.Background()
+
+	// BeforeSeq=4 lands inside the middle archive [3,4]; a 1-byte budget
+	// admits only that first overlapping archive and truncates at [1,2].
+	const beforeSeq = 4
+	first, truncated, reachedSeq, err := readNewestBounded(ctx, path, Filter{BeforeSeq: beforeSeq}, 10, 1)
+	if err != nil {
+		t.Fatalf("first readNewestBounded: %v", err)
+	}
+	if !truncated {
+		t.Fatalf("first call: truncated = false, want true")
+	}
+	if reachedSeq > beforeSeq {
+		t.Fatalf("reachedSeq = %d, want <= BeforeSeq %d (resume must never move above the cursor)", reachedSeq, beforeSeq)
+	}
+	if gotSeqs := seqsOf(first); !reflect.DeepEqual(gotSeqs, []uint64{3}) {
+		t.Fatalf("first call seqs = %v, want [3]", gotSeqs)
+	}
+
+	second, truncated2, _, err := readNewestBounded(ctx, path, Filter{BeforeSeq: reachedSeq}, 10, 1<<30)
+	if err != nil {
+		t.Fatalf("second readNewestBounded: %v", err)
+	}
+	if truncated2 {
+		t.Errorf("second call: truncated = true, want false (generous budget)")
+	}
+	combined := append(seqsOf(second), seqsOf(first)...) //nolint:gocritic // test-local slice, no aliasing concern
+	if !reflect.DeepEqual(combined, []uint64{1, 2, 3}) {
+		t.Fatalf("resumed combined seqs = %v, want [1 2 3] (no gap, no overlap, nothing at or above BeforeSeq)", combined)
+	}
+}
+
+func TestReadNewestBoundedSkipsSupplementalArchiveAboveCursor(t *testing.T) {
+	dir, _ := seedThreeArchives(t)
+	path := filepath.Join(dir, "events.jsonl")
+	ctx := context.Background()
+
+	// Promote archive [7,8] between the base archives snapshot and the
+	// supplemental listing, so it reaches readNewestBounded only through the
+	// supplemental tier — with a window wholly at or above the cursor.
+	var stderr bytes.Buffer
+	promoted := false
+	previous := readRotationDir
+	t.Cleanup(func() { readRotationDir = previous })
+	readRotationDir = func(name string) ([]os.DirEntry, error) {
+		if !promoted {
+			promoted = true
+			src := filepath.Join(dir, "late.jsonl")
+			writeJSONLEvents(t, src, 7, 8)
+			dest := filepath.Join(dir, formatArchiveBasename(time.Date(2026, 5, 7, 12, 15, 0, 0, time.UTC), 7, 8))
+			if err := gzipAndArchive(src, dest, &stderr); err != nil {
+				t.Fatalf("gzip late archive: %v", err)
+			}
+		}
+		return previous(name)
+	}
+
+	got, truncated, reachedSeq, err := readNewestBounded(ctx, path, Filter{BeforeSeq: 5}, 10, 1)
+	if err != nil {
+		t.Fatalf("readNewestBounded: %v", err)
+	}
+	if !promoted {
+		t.Fatal("supplemental listing hook never ran")
+	}
+	if !truncated {
+		t.Fatalf("truncated = false, want true (1-byte budget cannot cover [1,2] after [3,4])")
+	}
+	// Had [7,8] spent the first-archive allowance, [3,4] would truncate
+	// with zero rows and a resume boundary equal to the cursor — a wedge.
+	if gotSeqs := seqsOf(got); !reflect.DeepEqual(gotSeqs, []uint64{3, 4}) {
+		t.Fatalf("seqs = %v, want [3 4] (supplemental archive above the cursor must not use the first-archive allowance)", gotSeqs)
+	}
+	if reachedSeq != 3 {
+		t.Fatalf("reachedSeq = %d, want 3", reachedSeq)
+	}
+}

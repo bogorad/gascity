@@ -74,12 +74,18 @@ func readNewestBounded(ctx context.Context, path string, filter Filter, fetch in
 			if _, ok := listedArchives[eventSeqWindow{first: src.firstSeq, last: src.lastSeq}]; ok {
 				continue // already covered by the base archives snapshot below
 			}
+			// Same cursor guard as the base loop: an archive wholly outside
+			// the filter's window must neither spend the first-archive
+			// allowance nor mint a resume boundary at or above BeforeSeq.
+			if !archiveOverlapsFilter(archiveInfo{FirstSeq: src.firstSeq, LastSeq: src.lastSeq}, filter) {
+				continue
+			}
 		}
 		if cerr := ctx.Err(); cerr != nil {
 			return nil, false, 0, cerr
 		}
 		if src.kind == sourceArchive && chargeArchiveBudget(src.path, &budgetUsed, &openedArchive, maxArchiveBytes) {
-			return reverseEvents(newestFirst), true, src.lastSeq + 1, nil
+			return reverseEvents(newestFirst), true, clampResume(src.lastSeq+1, filter), nil
 		}
 		matches, rerr := readSegmentSourceMatches(src, filter)
 		if rerr != nil {
@@ -98,7 +104,7 @@ func readNewestBounded(ctx context.Context, path string, filter Filter, fetch in
 		}
 		archivePath := filepath.Join(dir, info.Basename)
 		if chargeArchiveBudget(archivePath, &budgetUsed, &openedArchive, maxArchiveBytes) {
-			return reverseEvents(newestFirst), true, info.LastSeq + 1, nil
+			return reverseEvents(newestFirst), true, clampResume(info.LastSeq+1, filter), nil
 		}
 
 		var archMatches []Event
@@ -114,6 +120,16 @@ func readNewestBounded(ctx context.Context, path string, filter Filter, fetch in
 	}
 
 	return reverseEvents(newestFirst), false, 0, nil
+}
+
+// clampResume caps a truncation resume boundary at the incoming cursor so a
+// follow-up call never re-serves rows at or above filter.BeforeSeq or moves
+// pagination backwards.
+func clampResume(seq uint64, filter Filter) uint64 {
+	if filter.BeforeSeq > 0 && seq > filter.BeforeSeq {
+		return filter.BeforeSeq
+	}
+	return seq
 }
 
 // chargeArchiveBudget charges path's on-disk size against the running

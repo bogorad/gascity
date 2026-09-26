@@ -1,12 +1,12 @@
 package resourcecensus
 
 import (
+	"flag"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"go/types"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -14,7 +14,16 @@ import (
 	"testing"
 	"testing/fstest"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
+	"github.com/gastownhall/gascity/internal/testpolicy/waiverclock"
 )
+
+// updateLedgerDoc regenerates the TESTING.md checked resource ledger block
+// from test/test-resources.toml when set. Run:
+//
+//	go test ./internal/testpolicy/resourcecensus -run TestRepositoryLedgerMatchesCensusAndDocumentation -update
+var updateLedgerDoc = flag.Bool("update", false, "regenerate the TESTING.md checked resource ledger block from test/test-resources.toml")
 
 func TestScanUsesImportIdentityAndParsedBuildConstraints(t *testing.T) {
 	t.Parallel()
@@ -1752,7 +1761,7 @@ func TestValidateAcceptsExactSourceRatchets(t *testing.T) {
 	policy := validLedger(census)
 	ledger := cloneLedger(policy)
 
-	if err := validateAgainstPolicy(policy, ledger, census, fixedNow()); err != nil {
+	if _, err := validateAgainstPolicy(policy, ledger, census, fixedNow(), waiverclock.ModeStrict); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
 }
@@ -1771,7 +1780,7 @@ func TestValidateRejectsDebtGrowthAndStaleHighBaselines(t *testing.T) {
 		row.BaselineCalls = 1
 		row.BaselineFiles = 1
 		ledger := cloneLedger(policy)
-		err := validateAgainstPolicy(policy, ledger, census, fixedNow())
+		_, err := validateAgainstPolicy(policy, ledger, census, fixedNow(), waiverclock.ModeStrict)
 		requireErrorContains(t, err,
 			"source resource census grew: scope=untagged resource=subprocess calls=2 (baseline 1), files=2 (baseline 1)")
 	})
@@ -1782,7 +1791,7 @@ func TestValidateRejectsDebtGrowthAndStaleHighBaselines(t *testing.T) {
 		row.BaselineCalls = 3
 		row.BaselineFiles = 3
 		ledger := cloneLedger(policy)
-		err := validateAgainstPolicy(policy, ledger, census, fixedNow())
+		_, err := validateAgainstPolicy(policy, ledger, census, fixedNow(), waiverclock.ModeStrict)
 		requireErrorContains(t, err,
 			"source resource census baseline is stale: scope=untagged resource=subprocess calls=2 (baseline 3), files=2 (baseline 3); lower the checked baseline to bank the improvement")
 	})
@@ -1801,7 +1810,7 @@ func TestValidateAllowsHistoricalNeedleToDifferFromASTCensus(t *testing.T) {
 	row.ReportedFiles = 1
 	ledger := cloneLedger(policy)
 
-	if err := validateAgainstPolicy(policy, ledger, census, fixedNow()); err != nil {
+	if _, err := validateAgainstPolicy(policy, ledger, census, fixedNow(), waiverclock.ModeStrict); err != nil {
 		t.Fatalf("Validate rejected historical source needle: %v", err)
 	}
 }
@@ -1819,7 +1828,7 @@ func TestValidateAllowsNarrowerHistoricalCmdGCNeedle(t *testing.T) {
 	row.ReportedFiles = 1
 	ledger := cloneLedger(policy)
 
-	if err := validateAgainstPolicy(policy, ledger, census, fixedNow()); err != nil {
+	if _, err := validateAgainstPolicy(policy, ledger, census, fixedNow(), waiverclock.ModeStrict); err != nil {
 		t.Fatalf("Validate rejected narrower historical cmd/gc source needle: %v", err)
 	}
 }
@@ -1837,7 +1846,7 @@ func TestValidateRejectsCoordinatedCmdGCCensusAndManifestGrowth(t *testing.T) {
 		Resource: ResourceEnvironment,
 	}}}
 
-	err := validateAgainstPolicy(policy, ledger, census, fixedNow())
+	_, err := validateAgainstPolicy(policy, ledger, census, fixedNow(), waiverclock.ModeStrict)
 	requireErrorContains(t, err, "baseline_calls = 1, bootstrap policy requires 0")
 	if strings.Contains(err.Error(), "source resource census") {
 		t.Fatalf("live census was compared before cmd/gc policy drift was rejected: %v", err)
@@ -1925,7 +1934,7 @@ func TestValidateRejectsBootstrapPolicyDriftBeforeLiveCensus(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ledger := cloneLedger(policy)
 			tt.mutate(&ledger)
-			err := validateAgainstPolicy(policy, ledger, grownCensus, fixedNow())
+			_, err := validateAgainstPolicy(policy, ledger, grownCensus, fixedNow(), waiverclock.ModeStrict)
 			requireErrorContains(t, err, tt.want)
 			if strings.Contains(err.Error(), "source resource census") {
 				t.Fatalf("live census was compared before bootstrap policy drift was rejected: %v", err)
@@ -1939,8 +1948,8 @@ func TestValidateUsesCodeOwnedBootstrapPolicy(t *testing.T) {
 
 	ledger := cloneLedger(bootstrapPolicy)
 	ledger.Debt[0].OwnerBead = "ga-rewritten"
-	err := Validate(ledger, Census{}, fixedNow())
-	requireErrorContains(t, err, `owner_bead = "ga-rewritten", bootstrap policy requires "ga-80po0c.2"`)
+	_, err := Validate(ledger, Census{}, fixedNow(), waiverclock.ModeStrict)
+	requireErrorContains(t, err, `owner_bead = "ga-rewritten", bootstrap policy requires "ga-cp3hwi"`)
 	if strings.Contains(err.Error(), "source resource census") {
 		t.Fatalf("live census was compared before code-owned policy drift was rejected: %v", err)
 	}
@@ -1951,8 +1960,8 @@ func TestBootstrapPolicyOwnsHTTPTestServerDebt(t *testing.T) {
 
 	for _, rows := range [][]Baseline{bootstrapPolicy.Debt, bootstrapPolicy.SmallDebt} {
 		row := findRow(t, rows, ScopeUntagged, ResourceHTTPTestServer)
-		if row.OwnerBead != "ga-80po0c.2.2" || row.MigrationTarget != "P0.4c" {
-			t.Fatalf("HTTP test server owner = %q/%q, want ga-80po0c.2.2/P0.4c", row.OwnerBead, row.MigrationTarget)
+		if row.OwnerBead != "ga-cp3hwi" || row.MigrationTarget != "P0.4c" {
+			t.Fatalf("HTTP test server owner = %q/%q, want ga-cp3hwi/P0.4c", row.OwnerBead, row.MigrationTarget)
 		}
 	}
 }
@@ -1964,8 +1973,8 @@ func TestBootstrapPolicyOwnsListenerHelperDebt(t *testing.T) {
 	if audit.BaselineCalls != 58 || audit.BaselineFiles != 23 || audit.ReportedCalls != 58 || audit.ReportedFiles != 23 {
 		t.Fatalf("all-source listener-helper baseline/reported = %d/%d, %d/%d; want 58/23, 58/23", audit.BaselineCalls, audit.BaselineFiles, audit.ReportedCalls, audit.ReportedFiles)
 	}
-	if audit.OwnerBead != "ga-80po0c.2.2.3" || audit.MigrationTarget != "P0.4c-listener-helper" {
-		t.Fatalf("all-source listener-helper owner = %q/%q, want ga-80po0c.2.2.3/P0.4c-listener-helper", audit.OwnerBead, audit.MigrationTarget)
+	if audit.OwnerBead != "ga-cp3hwi" || audit.MigrationTarget != "P0.4c-listener-helper" {
+		t.Fatalf("all-source listener-helper owner = %q/%q, want ga-cp3hwi/P0.4c-listener-helper", audit.OwnerBead, audit.MigrationTarget)
 	}
 
 	for _, rows := range [][]Baseline{bootstrapPolicy.Debt, bootstrapPolicy.SmallDebt} {
@@ -1973,8 +1982,8 @@ func TestBootstrapPolicyOwnsListenerHelperDebt(t *testing.T) {
 		if row.BaselineCalls != 38 || row.BaselineFiles != 13 || row.ReportedCalls != 38 || row.ReportedFiles != 13 {
 			t.Fatalf("listener-helper baseline/reported = %d/%d, %d/%d; want 38/13, 38/13", row.BaselineCalls, row.BaselineFiles, row.ReportedCalls, row.ReportedFiles)
 		}
-		if row.OwnerBead != "ga-80po0c.2.2.3" || row.MigrationTarget != "P0.4c-listener-helper" {
-			t.Fatalf("listener-helper owner = %q/%q, want ga-80po0c.2.2.3/P0.4c-listener-helper", row.OwnerBead, row.MigrationTarget)
+		if row.OwnerBead != "ga-cp3hwi" || row.MigrationTarget != "P0.4c-listener-helper" {
+			t.Fatalf("listener-helper owner = %q/%q, want ga-cp3hwi/P0.4c-listener-helper", row.OwnerBead, row.MigrationTarget)
 		}
 	}
 }
@@ -1983,16 +1992,16 @@ func TestBootstrapPolicyOwnsNetListenDebtAndExactMediumOwners(t *testing.T) {
 	t.Parallel()
 
 	debt := findRow(t, bootstrapPolicy.Debt, ScopeUntagged, ResourceNetListen)
-	if debt.BaselineCalls != 94 || debt.BaselineFiles != 35 || debt.ReportedCalls != 92 || debt.ReportedFiles != 34 {
-		t.Fatalf("stream-listener source baseline/reported = %d/%d, %d/%d; want 94/35, 92/34", debt.BaselineCalls, debt.BaselineFiles, debt.ReportedCalls, debt.ReportedFiles)
+	if debt.BaselineCalls != 98 || debt.BaselineFiles != 38 || debt.ReportedCalls != 92 || debt.ReportedFiles != 34 {
+		t.Fatalf("stream-listener source baseline/reported = %d/%d, %d/%d; want 98/38, 92/34", debt.BaselineCalls, debt.BaselineFiles, debt.ReportedCalls, debt.ReportedFiles)
 	}
 	smallDebt := findRow(t, bootstrapPolicy.SmallDebt, ScopeUntagged, ResourceNetListen)
-	if smallDebt.BaselineCalls != 92 || smallDebt.BaselineFiles != 34 {
-		t.Fatalf("stream-listener Small baseline = %d/%d, want 92/34", smallDebt.BaselineCalls, smallDebt.BaselineFiles)
+	if smallDebt.BaselineCalls != 96 || smallDebt.BaselineFiles != 37 {
+		t.Fatalf("stream-listener Small baseline = %d/%d, want 96/37", smallDebt.BaselineCalls, smallDebt.BaselineFiles)
 	}
 	for _, row := range []*Baseline{debt, smallDebt} {
-		if row.OwnerBead != "ga-80po0c.2.2.2" || row.MigrationTarget != "P0.4c-listener" {
-			t.Fatalf("stream-listener owner = %q/%q, want ga-80po0c.2.2.2/P0.4c-listener", row.OwnerBead, row.MigrationTarget)
+		if row.OwnerBead != "ga-cp3hwi" || row.MigrationTarget != "P0.4c-listener" {
+			t.Fatalf("stream-listener owner = %q/%q, want ga-cp3hwi/P0.4c-listener", row.OwnerBead, row.MigrationTarget)
 		}
 	}
 
@@ -2007,8 +2016,8 @@ func TestBootstrapPolicyOwnsNetListenDebtAndExactMediumOwners(t *testing.T) {
 		if len(row.Resources) != 1 || row.Resources[0] != ResourceNetListen {
 			t.Fatalf("herdr Medium owner %s resources = %v, want net_listen", row.Owner, row.Resources)
 		}
-		if row.OwnerBead != "ga-80po0c.2.2.2" || row.MigrationTarget != "P0.4c-listener" {
-			t.Fatalf("herdr Medium owner %s policy = %q/%q, want ga-80po0c.2.2.2/P0.4c-listener", row.Owner, row.OwnerBead, row.MigrationTarget)
+		if row.OwnerBead != "ga-cp3hwi" || row.MigrationTarget != "P0.4c-listener" {
+			t.Fatalf("herdr Medium owner %s policy = %q/%q, want ga-cp3hwi/P0.4c-listener", row.Owner, row.OwnerBead, row.MigrationTarget)
 		}
 		delete(wantOwners, row.Owner)
 	}
@@ -2025,8 +2034,8 @@ func TestBootstrapPolicyOwnsNetListenConfigDebt(t *testing.T) {
 		if row.BaselineCalls != 1 || row.BaselineFiles != 1 {
 			t.Fatalf("net.ListenConfig listener baseline = %d/%d, want 1/1", row.BaselineCalls, row.BaselineFiles)
 		}
-		if row.OwnerBead != "ga-80po0c.2.2.2" || row.MigrationTarget != "P0.4c-listener" {
-			t.Fatalf("net.ListenConfig listener owner = %q/%q, want ga-80po0c.2.2.2/P0.4c-listener", row.OwnerBead, row.MigrationTarget)
+		if row.OwnerBead != "ga-cp3hwi" || row.MigrationTarget != "P0.4c-listener" {
+			t.Fatalf("net.ListenConfig listener owner = %q/%q, want ga-cp3hwi/P0.4c-listener", row.OwnerBead, row.MigrationTarget)
 		}
 	}
 }
@@ -2039,8 +2048,8 @@ func TestBootstrapPolicyOwnsNetListenPacketDebt(t *testing.T) {
 		if row.BaselineCalls != 3 || row.BaselineFiles != 2 {
 			t.Fatalf("packet-listener baseline = %d/%d, want 3/2", row.BaselineCalls, row.BaselineFiles)
 		}
-		if row.OwnerBead != "ga-80po0c.2.2.2" || row.MigrationTarget != "P0.4c-listener" {
-			t.Fatalf("packet-listener owner = %q/%q, want ga-80po0c.2.2.2/P0.4c-listener", row.OwnerBead, row.MigrationTarget)
+		if row.OwnerBead != "ga-cp3hwi" || row.MigrationTarget != "P0.4c-listener" {
+			t.Fatalf("packet-listener owner = %q/%q, want ga-cp3hwi/P0.4c-listener", row.OwnerBead, row.MigrationTarget)
 		}
 	}
 }
@@ -2053,8 +2062,8 @@ func TestBootstrapPolicyOwnsSyscallListenDebt(t *testing.T) {
 		if row.BaselineCalls != 1 || row.BaselineFiles != 1 {
 			t.Fatalf("syscall.Listen baseline = %d/%d, want 1/1", row.BaselineCalls, row.BaselineFiles)
 		}
-		if row.OwnerBead != "ga-80po0c.2.2" || row.MigrationTarget != "P0.4c" {
-			t.Fatalf("syscall.Listen owner = %q/%q, want ga-80po0c.2.2/P0.4c", row.OwnerBead, row.MigrationTarget)
+		if row.OwnerBead != "ga-cp3hwi" || row.MigrationTarget != "P0.4c" {
+			t.Fatalf("syscall.Listen owner = %q/%q, want ga-cp3hwi/P0.4c", row.OwnerBead, row.MigrationTarget)
 		}
 	}
 }
@@ -2063,16 +2072,16 @@ func TestBootstrapPolicyOwnsTmuxDebtAndExactMediumSetup(t *testing.T) {
 	t.Parallel()
 
 	debt := findRow(t, bootstrapPolicy.Debt, ScopeUntagged, ResourceTmux)
-	if debt.BaselineCalls != 6 || debt.BaselineFiles != 2 {
-		t.Fatalf("tmux source baseline = %d/%d, want 6/2", debt.BaselineCalls, debt.BaselineFiles)
+	if debt.BaselineCalls != 9 || debt.BaselineFiles != 4 {
+		t.Fatalf("tmux source baseline = %d/%d, want 9/4", debt.BaselineCalls, debt.BaselineFiles)
 	}
 	smallDebt := findRow(t, bootstrapPolicy.SmallDebt, ScopeUntagged, ResourceTmux)
-	if smallDebt.BaselineCalls != 0 || smallDebt.BaselineFiles != 0 {
-		t.Fatalf("tmux Small baseline = %d/%d, want 0/0", smallDebt.BaselineCalls, smallDebt.BaselineFiles)
+	if smallDebt.BaselineCalls != 3 || smallDebt.BaselineFiles != 2 {
+		t.Fatalf("tmux Small baseline = %d/%d, want 3/2", smallDebt.BaselineCalls, smallDebt.BaselineFiles)
 	}
 	for _, row := range []*Baseline{debt, smallDebt} {
-		if row.OwnerBead != "ga-80po0c.2.2.1" || row.MigrationTarget != "P0.4c-tmux" {
-			t.Fatalf("tmux owner = %q/%q, want ga-80po0c.2.2.1/P0.4c-tmux", row.OwnerBead, row.MigrationTarget)
+		if row.OwnerBead != "ga-cp3hwi" || row.MigrationTarget != "P0.4c-tmux" {
+			t.Fatalf("tmux owner = %q/%q, want ga-cp3hwi/P0.4c-tmux", row.OwnerBead, row.MigrationTarget)
 		}
 	}
 
@@ -2174,7 +2183,7 @@ func TestValidateRequiresTheExactBootstrapRowSet(t *testing.T) {
 			mutate: func(ledger *Ledger) {
 				ledger.Debt[0].Expires = "2026-07-12"
 			},
-			want: `debt baseline scope=untagged resource=subprocess: expired 2026-07-12`,
+			want: `debt baseline scope=untagged resource=subprocess: waiver owned by P0.4 expired 2026-07-12`,
 		},
 		{
 			name: "unknown resource",
@@ -2197,7 +2206,7 @@ func TestValidateRequiresTheExactBootstrapRowSet(t *testing.T) {
 			policy := validLedger(Census{})
 			ledger := cloneLedger(policy)
 			tt.mutate(&ledger)
-			err := validateAgainstPolicy(policy, ledger, Census{}, fixedNow())
+			_, err := validateAgainstPolicy(policy, ledger, Census{}, fixedNow(), waiverclock.ModeStrict)
 			requireErrorContains(t, err, tt.want)
 		})
 	}
@@ -2278,6 +2287,75 @@ func TestCheckedMarkdownBlockRequiresOneOrderedMarkerPair(t *testing.T) {
 	}
 }
 
+func TestReplaceMarkdownBlockRoundTrips(t *testing.T) {
+	t.Parallel()
+
+	document := "# Title\n\nintro text\n\n" + markdownBegin + "\nstale content\n" + markdownEnd + "\n\ntrailing text\n"
+	replacement := markdownBegin + "\nfresh content\n" + markdownEnd
+
+	updated, err := ReplaceMarkdownBlock(document, replacement)
+	if err != nil {
+		t.Fatalf("ReplaceMarkdownBlock: %v", err)
+	}
+	want := "# Title\n\nintro text\n\n" + replacement + "\n\ntrailing text\n"
+	if updated != want {
+		t.Fatalf("ReplaceMarkdownBlock mismatch\n--- got ---\n%s\n--- want ---\n%s", updated, want)
+	}
+
+	block, err := CheckedMarkdownBlock(updated)
+	if err != nil {
+		t.Fatalf("CheckedMarkdownBlock(updated): %v", err)
+	}
+	if block != replacement {
+		t.Fatalf("round-trip mismatch\n--- got ---\n%s\n--- want ---\n%s", block, replacement)
+	}
+}
+
+func TestGeneratedLedgerBlockRoundTrips(t *testing.T) {
+	t.Parallel()
+
+	ledger := Ledger{
+		Version: 2,
+		AuditBaseline: []Baseline{
+			validAudit(ScopeAll, ResourceFixedSleep, 4, 2),
+		},
+		Debt: []Baseline{
+			validDebt(ScopeUntagged, ResourceSubprocess, 3, 2),
+		},
+	}
+	generated := RenderMarkdown(ledger)
+	document := "# TESTING\n\nsome preamble\n\n" + markdownBegin + "\nold, stale table\n" + markdownEnd + "\n\nmore docs below\n"
+
+	updated, err := ReplaceMarkdownBlock(document, generated)
+	if err != nil {
+		t.Fatalf("ReplaceMarkdownBlock: %v", err)
+	}
+	block, err := CheckedMarkdownBlock(updated)
+	if err != nil {
+		t.Fatalf("CheckedMarkdownBlock(updated): %v", err)
+	}
+	if block != generated {
+		t.Fatalf("generated ledger block did not round-trip\n--- got ---\n%s\n--- want ---\n%s", block, generated)
+	}
+	if !strings.HasPrefix(updated, "# TESTING\n\nsome preamble\n\n") || !strings.HasSuffix(updated, "\n\nmore docs below\n") {
+		t.Fatalf("ReplaceMarkdownBlock altered content outside the marker pair:\n%s", updated)
+	}
+}
+
+func TestReplaceMarkdownBlockRequiresOneOrderedMarkerPair(t *testing.T) {
+	t.Parallel()
+
+	for _, document := range []string{
+		"no markers",
+		markdownEnd + "\n" + markdownBegin,
+		markdownBegin + "\n" + markdownEnd + "\n" + markdownBegin,
+	} {
+		if _, err := ReplaceMarkdownBlock(document, markdownBegin+markdownEnd); err == nil {
+			t.Fatalf("ReplaceMarkdownBlock(%q) unexpectedly succeeded", document)
+		}
+	}
+}
+
 func TestRepositoryLedgerMatchesCensusAndDocumentation(t *testing.T) {
 	root := repositoryRoot(t)
 	ledger, err := LoadLedger(filepath.Join(root, "test", "test-resources.toml"))
@@ -2288,20 +2366,47 @@ func TestRepositoryLedgerMatchesCensusAndDocumentation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ScanRepository: %v", err)
 	}
-	if err := Validate(ledger, census, time.Now().UTC()); err != nil {
+	// The one call in this package that reads the wall clock, and so the one a
+	// calendar rollover can turn red with no code change. The mode decides who
+	// pays for that: everyone, or the row's owner.
+	mode, err := waiverclock.FromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	warnings, err := Validate(ledger, census, time.Now().UTC(), mode)
+	for _, warning := range warnings {
+		t.Logf("waiver clock: %s", warning)
+	}
+	if err != nil {
 		t.Fatalf("resource ledger drift:\n%v", err)
 	}
 
-	doc, err := fs.ReadFile(os.DirFS(root), "TESTING.md")
+	testingMDPath := filepath.Join(root, "TESTING.md")
+	doc, err := os.ReadFile(testingMDPath)
 	if err != nil {
 		t.Fatalf("read TESTING.md: %v", err)
 	}
+	want := RenderMarkdown(ledger)
+
+	if *updateLedgerDoc {
+		updated, err := ReplaceMarkdownBlock(string(doc), want)
+		if err != nil {
+			t.Fatalf("replace TESTING.md ledger block: %v", err)
+		}
+		if updated != string(doc) {
+			if err := os.WriteFile(testingMDPath, []byte(updated), 0o644); err != nil {
+				t.Fatalf("write TESTING.md: %v", err)
+			}
+			doc = []byte(updated)
+		}
+	}
+
 	got, err := CheckedMarkdownBlock(string(doc))
 	if err != nil {
-		t.Fatalf("checked TESTING.md block: %v\n--- wanted block ---\n%s", err, RenderMarkdown(ledger))
+		t.Fatalf("checked TESTING.md block: %v\n--- wanted block ---\n%s", err, want)
 	}
-	if want := RenderMarkdown(ledger); got != want {
-		t.Fatalf("TESTING.md resource ledger block is stale\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	if got != want {
+		t.Fatalf("TESTING.md resource ledger block is stale; run `go test ./internal/testpolicy/resourcecensus -run TestRepositoryLedgerMatchesCensusAndDocumentation -update` to regenerate it, then review the diff\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
 }
 
@@ -2419,6 +2524,9 @@ func repositoryRoot(t *testing.T) string {
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller did not report census_test.go")
+	}
+	if root := bazeltest.OverrideRoot(); root != "" {
+		file = filepath.Join(root, "internal", "testpolicy", "resourcecensus", "census_test.go")
 	}
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", ".."))
 }

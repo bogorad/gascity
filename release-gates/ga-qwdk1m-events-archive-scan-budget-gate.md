@@ -11,6 +11,16 @@
   checkout, so this checklist applies the active deployer release criteria and
   the repository gates in `TESTING.md`.
 
+> **Base moved after this gate was written.** The SHAs above pin the
+> pre-merge candidate. The branch was later brought up to date by merging
+> `origin/main` (`fcdf3b56fe7d939f8409a3e38ca1ae1d5a8a03f3`), with the
+> generated artifacts and embedded dashboard bundle regenerated rather than
+> hand-merged. The same maintainer pass added the cursor fixes: supplemental
+> archives above `BeforeSeq` are skipped, truncation resume boundaries are
+> clamped to `BeforeSeq`, and the bounded scan is fenced below the tail. The
+> evidence in this file describes the pre-merge candidate. The PR's CI on the
+> pushed head is the authoritative evidence for the merged result.
+
 ## Scope
 
 This change bounds the no-lower-bound archive fallback for
