@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -137,5 +138,87 @@ func TestReconcileSessionBeads_RecycledSeatWithoutResetCommitStaysAsleep(t *test
 
 	if env.sp.IsRunning(sessionName) {
 		t.Fatalf("seat %q woke with continuation_reset_pending=true but no reset_committed_at and no demand", sessionName)
+	}
+}
+
+// Guard: an idle on_demand seat that holds OPEN (unclaimed) assigned work is
+// still recycled. The new exemption only covers a seat with nothing pointing
+// at it, and an open-but-unclaimed work bead is exactly such a pointer, even
+// though it does not set holdsClaim — that gate reads
+// sessionHasInProgressAssignedWorkForConfig (in_progress only) by design, so
+// unclaimed work would otherwise slip past both checks and strand the work.
+func TestReconcileSessionBeads_ProgressStallRecyclesIdleOnDemandSeatWithOpenAssignedWork(t *testing.T) {
+	env, session, sessionName := newIdleOnDemandSeatEnv(t)
+
+	if _, err := env.store.Create(beads.Bead{Title: "unclaimed work", Type: "task", Assignee: sessionName}); err != nil {
+		t.Fatalf("create open work bead: %v", err)
+	}
+
+	env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{session}, noDemand(), nil)
+
+	if !strings.Contains(env.stderr.String(), "progress-stalled") {
+		t.Fatalf("stderr = %q, want a progress-stalled recycle for an idle on_demand seat with open assigned work", env.stderr.String())
+	}
+	if env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q still running; want it recycled when it holds open (unclaimed) assigned work", sessionName)
+	}
+}
+
+// reconcileWithNamedDemand is reconcileWithPoolDesiredAndDrainOps's sibling
+// for namedSessionDemand/namedRoutedDemand: reconcileSessionBeadsAtPath (the
+// helper behind reconcileWithPoolDesiredAndDrainOps) hardcodes both to nil,
+// so a test needs the one layer down — reconcileSessionBeadsAtPathWithNamedDemand
+// — to ever exercise either map. It mirrors reconcileSessionBeadsAtPath's own
+// row/snapshot construction so callers still just pass raw beads.
+func (e *restartRequestTestEnv) reconcileWithNamedDemand(sessions []beads.Bead, poolDesired map[string]int, namedSessionDemand, namedRoutedDemand map[string]bool) {
+	cfgNames := configuredSessionNames(e.cfg, "", e.store)
+	snap := newSessionBeadSnapshotFromReconcileRows(sessionpkg.ReconcileRowsFromBeads(sessions))
+	_ = reconcileSessionBeadsAtPathWithNamedDemand(
+		context.Background(),
+		"",
+		snap.OpenForReconcile(),
+		snap,
+		e.desiredState,
+		cfgNames,
+		e.cfg,
+		e.sp,
+		e.store,
+		nil,
+		nil,
+		nil,
+		nil,
+		e.dt,
+		nil,
+		poolDesired,
+		namedSessionDemand,
+		namedRoutedDemand,
+		false,
+		nil,
+		"",
+		nil,
+		e.clk,
+		e.rec,
+		0,
+		0,
+		&e.stdout,
+		&e.stderr,
+		e.startOptions...,
+	)
+}
+
+// Guard: an idle on_demand seat with routed demand this tick is NOT exempt.
+// namedRoutedDemand is exactly one of the signals compute_awake_set.go's own
+// on-demand:running override wakes the seat FOR, so the claim-less recycler
+// must keep recycling a seat carrying it, same as before this fix.
+func TestReconcileSessionBeads_ProgressStallRecyclesIdleOnDemandSeatWithRoutedDemand(t *testing.T) {
+	env, session, sessionName := newIdleOnDemandSeatEnv(t)
+
+	env.reconcileWithNamedDemand([]beads.Bead{session}, noDemand(), nil, map[string]bool{"worker": true})
+
+	if !strings.Contains(env.stderr.String(), "progress-stalled") {
+		t.Fatalf("stderr = %q, want a progress-stalled recycle for an idle on_demand seat with routed demand", env.stderr.String())
+	}
+	if env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q still running; want it recycled when namedRoutedDemand is set for its identity", sessionName)
 	}
 }
