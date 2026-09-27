@@ -74,7 +74,7 @@ func seedHistoryTailLayout(t *testing.T) string {
 	return path
 }
 
-func historyTail(t *testing.T, ctx context.Context, path string, f Filter, limit int, count bool) ([]Event, int) {
+func historyTail(ctx context.Context, t *testing.T, path string, f Filter, limit int, count bool) ([]Event, int) {
 	t.Helper()
 	got, matched, err := ReadFilteredHistoryTail(ctx, path, f, limit, count)
 	if err != nil {
@@ -109,7 +109,7 @@ func TestReadFilteredHistoryTailMatchesFullScan(t *testing.T) {
 					want = want[len(want)-limit:]
 				}
 				for _, count := range []bool{false, true} {
-					got, matched := historyTail(t, context.Background(), path, f, limit, count)
+					got, matched := historyTail(context.Background(), t, path, f, limit, count)
 					if !reflect.DeepEqual(seqsOf(got), seqsOf(want)) {
 						t.Errorf("%s before=%d limit=%d count=%v: got %v, want %v", name, before, limit, count, seqsOf(got), seqsOf(want))
 					}
@@ -167,7 +167,7 @@ func TestReadFilteredHistoryTailMatchesFullScanWithLongLines(t *testing.T) {
 			want = want[len(want)-limit:]
 		}
 		for _, count := range []bool{false, true} {
-			got, _ := historyTail(t, context.Background(), path, Filter{}, limit, count)
+			got, _ := historyTail(context.Background(), t, path, Filter{}, limit, count)
 			if !reflect.DeepEqual(seqsOf(got), seqsOf(want)) {
 				t.Fatalf("limit=%d count=%v: got %v, want %v", limit, count, seqsOf(got), seqsOf(want))
 			}
@@ -191,7 +191,7 @@ func TestReadFilteredHistoryTailOpensOnlyNeededSegments(t *testing.T) {
 	if _, err := ReadFilteredWithInFlight(path, Filter{}); err == nil {
 		t.Fatal("control: the full scan did not reach the unreadable oldest archive")
 	}
-	got, _ := historyTail(t, context.Background(), path, Filter{}, 90, false)
+	got, _ := historyTail(context.Background(), t, path, Filter{}, 90, false)
 	if want := seqRange(41, 130); !reflect.DeepEqual(seqsOf(got), want) {
 		t.Fatalf("got %v, want %v", seqsOf(got), want)
 	}
@@ -297,7 +297,7 @@ func TestReadFilteredHistoryTailMergesOverlappingSegmentsByExactSeq(t *testing.T
 		t.Fatalf("control: the full scan gives %v, want %v", seqsOf(full), want)
 	}
 	for _, count := range []bool{false, true} {
-		got, matched := historyTail(t, context.Background(), path, Filter{}, 100, count)
+		got, matched := historyTail(context.Background(), t, path, Filter{}, 100, count)
 		if !reflect.DeepEqual(seqsOf(got), seqsOf(full)) || matched != len(full) {
 			t.Fatalf("count=%v: got %v (matched %d), want %v (matched %d)", count, seqsOf(got), matched, seqsOf(full), len(full))
 		}

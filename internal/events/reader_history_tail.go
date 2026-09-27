@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -198,7 +199,7 @@ func (a activeLog) firstSeq(ctx context.Context) (uint64, bool, error) {
 				return head.Seq, true, nil
 			}
 		}
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			return 0, false, nil
 		}
 		if err != nil {
@@ -317,7 +318,7 @@ type eventRing struct {
 	last      uint64
 }
 
-func newEventRing(max int) *eventRing { return &eventRing{max: max} }
+func newEventRing(n int) *eventRing { return &eventRing{max: n} }
 
 func (r *eventRing) push(e Event) {
 	if r.ascending {
@@ -376,7 +377,7 @@ func readLinesInto(ctx context.Context, br *bufio.Reader, filter Filter, ring *e
 				ring.push(e)
 			}
 		}
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			return nil
 		}
 		if err != nil {
@@ -394,7 +395,7 @@ func readLineContext(ctx context.Context, br *bufio.Reader) ([]byte, error) {
 	total := 0
 	for {
 		chunk, err := br.ReadSlice('\n')
-		if err != bufio.ErrBufferFull {
+		if !errors.Is(err, bufio.ErrBufferFull) {
 			if len(parts) == 0 {
 				return chunk, err
 			}
