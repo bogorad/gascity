@@ -1764,11 +1764,29 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			if !ok {
 				continue
 			}
-			if strings.TrimSpace(b.Metadata["session_name"]) == spec.SessionName {
+			beadSessionName := strings.TrimSpace(b.Metadata["session_name"])
+			if beadSessionName == spec.SessionName {
 				continue
 			}
+			// Canonical-singleton pool step-aside carve-out (ga-vixyn5.1): a
+			// pool instance's runtime name always carries poolRuntimeNameSuffix
+			// (session_name_lookup.go) so it never collides with the name a
+			// configured named session reserves. FindCanonicalNamedSessionInfo's
+			// alias pass legitimately adopts exactly this bead as canonical one
+			// tick earlier; treating that adoption as a genuine reconfiguration
+			// would contradict that decision instead of agreeing with it. The
+			// close attempt below still runs unchanged for this shape -- it
+			// already only closes an unassigned, stopped bead, and a no-work
+			// adopted pool bead recycling as reconfigured is correct, not the
+			// bug (TestK88_Observation_AdoptedPoolNamedBeadWithoutWorkIsClosedAsReconfigured).
+			// Only the failure side effect changes: this identity must not
+			// enter blockedReconfiguredNamedIdentities, since it was never a
+			// real reconfiguration conflict to begin with.
+			carveOut := spec.Agent != nil && spec.Agent.UsesCanonicalSingletonPoolIdentity() && beadSessionName == spec.SessionName+poolRuntimeNameSuffix
 			if !closeSessionBeadIfRuntimeStoppedAndUnassigned(cityPath, store, rigStores, sp, cfg, b, "reconfigured", "reconfigured named session", now, stderr) {
-				blockedReconfiguredNamedIdentities[identity] = true
+				if !carveOut {
+					blockedReconfiguredNamedIdentities[identity] = true
+				}
 				continue
 			}
 			existing[i].Status = "closed"
@@ -1783,9 +1801,6 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		agentCfg := templateParamsToConfig(tp)
 		liveHash := runtime.LiveFingerprint(agentCfg)
 		isConfiguredNamed := strings.TrimSpace(tp.ConfiguredNamedIdentity) != ""
-		if isConfiguredNamed && blockedReconfiguredNamedIdentities[strings.TrimSpace(tp.ConfiguredNamedIdentity)] {
-			continue
-		}
 		origin := templateParamsSessionOrigin(tp)
 
 		agentName := tp.TemplateName
@@ -1819,6 +1834,16 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		}
 
 		b, exists := bySessionName[sn]
+		if !exists && isConfiguredNamed && blockedReconfiguredNamedIdentities[strings.TrimSpace(tp.ConfiguredNamedIdentity)] {
+			// The old bead for this identity is still open awaiting close (it
+			// has assigned work) -- do not mint or resurrect a second one at
+			// its new/adopted name while it waits. An ALREADY-existing bead at
+			// this exact session_name (e.g. the canonical-singleton pool
+			// adopted shape handled above) is a different case and reaches the
+			// refresh logic below unaffected: only creation is gated here,
+			// never metadata refresh of a bead that already exists (ga-vixyn5.1).
+			continue
+		}
 		if !exists && isConfiguredNamed {
 			if liveBead, ok, freshErr := findOpenSessionBeadBySessionName(store, sn); freshErr != nil {
 				fmt.Fprintf(stderr, "session beads: refreshing open bead for %s: %v\n", sn, freshErr) //nolint:errcheck

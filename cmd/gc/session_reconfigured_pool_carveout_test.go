@@ -237,7 +237,7 @@ func TestK88_Artifact_AdoptionTickIsLastSyncWrite(t *testing.T) {
 	k88Sync(t, store, cfg, sp, ds) // any later config change
 	tick2, _ := store.Get(b.ID)
 	t.Logf("tick2: command=%q synced_at=%q", tick2.Metadata["command"], tick2.Metadata["synced_at"])
-	if tick2.Metadata["command"] != k88Fresh {
-		t.Fatalf("tick2 refreshed the command; the freeze did not reproduce")
+	if tick2.Metadata["command"] != tp.Command {
+		t.Fatalf("tick2 did not refresh the command: got %q, want %q (the freeze reproduced)", tick2.Metadata["command"], tp.Command)
 	}
 }
