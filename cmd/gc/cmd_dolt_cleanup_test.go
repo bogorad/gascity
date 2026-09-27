@@ -715,8 +715,16 @@ func TestRunDoltCleanup_DryRunAllowsProcessTempRootTestConfig(t *testing.T) {
 // fields rather than a second classifier.
 func TestRunDoltCleanup_ProtectedRollupByKind(t *testing.T) {
 	procs := []DoltProcInfo{
-		// Active rig: port matches the resolved cleanup port (same recipe as
-		// TestRunDoltCleanup_DryRunReportsReapPlanWithoutKilling's PID 1138290).
+		// Active rig: LiveResolve (below) resolves the managed city dolt to
+		// port 28231 via fakeLiveResolve, which protectedDoltPortsForReap
+		// records as rigPortByPort[28231]="managed city dolt" independent of
+		// Argv. classifyDoltProcess matches on any port in p.Ports, so a bare
+		// argv with no --config still lands in the "active rig dolt server"
+		// branch. (TestRunDoltCleanup_DryRunReportsReapPlanWithoutKilling's
+		// PID 1138290 looks similar but has no LiveResolve wired, so it is
+		// actually protected via the "no --config path detected" fallback,
+		// not this branch — that test only asserts the flat PID list, so it
+		// never distinguishes the two.)
 		{PID: 501, Ports: []int{28231}, Argv: []string{"dolt", "sql-server"}},
 		// Container-managed bare server (ga-sm1cvj shape; see
 		// TestContainerDoltServerIsClassified in dolt_cleanup_reaper_test.go).
@@ -731,6 +739,7 @@ func TestRunDoltCleanup_ProtectedRollupByKind(t *testing.T) {
 		FS:                fsys.NewFake(),
 		JSON:              true,
 		HomeDir:           "/home/u",
+		LiveResolve:       fakeLiveResolve(),
 		DiscoverProcesses: func() ([]DoltProcInfo, error) { return procs, nil },
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
