@@ -41,6 +41,10 @@ func TestCleanupReportJSONShape(t *testing.T) {
 		`"purge":{`,
 		`"reaped":{`,
 		`"summary":{`,
+		// ga-xkc9mo: protected rollup is additive to gc.dolt.cleanup.v1 and
+		// always present, zero-valued when nothing is protected.
+		`"protected_total":0`,
+		`"protected_by_kind":{}`,
 		`"errors":[]`,
 		`"skipped":[{"name":"testdb.invalid","reason":"invalid-identifier"}]`,
 	}
@@ -700,6 +704,62 @@ func TestRunDoltCleanup_DryRunAllowsProcessTempRootTestConfig(t *testing.T) {
 	}
 	if len(r.Reaped.ProtectedPIDs) != 0 {
 		t.Errorf("ProtectedPIDs = %v, want none for os.TempDir()/Test* config", r.Reaped.ProtectedPIDs)
+	}
+}
+
+// TestRunDoltCleanup_ProtectedRollupByKind covers ga-xkc9mo: a 100%-protected
+// population (zero reap targets) must still surface in .summary instead of
+// collapsing into orphans:0. Three protected processes exercise the three
+// kinds the fix spec requires at minimum: active-rig, container:<runtime>,
+// and unreapable-config, derived from the existing Reason/ContainerRuntime
+// fields rather than a second classifier.
+func TestRunDoltCleanup_ProtectedRollupByKind(t *testing.T) {
+	procs := []DoltProcInfo{
+		// Active rig: port matches the resolved cleanup port (same recipe as
+		// TestRunDoltCleanup_DryRunReportsReapPlanWithoutKilling's PID 1138290).
+		{PID: 501, Ports: []int{28231}, Argv: []string{"dolt", "sql-server"}},
+		// Container-managed bare server (ga-sm1cvj shape; see
+		// TestContainerDoltServerIsClassified in dolt_cleanup_reaper_test.go).
+		{PID: 502, Argv: []string{"dolt", "sql-server", "-H", "127.0.0.1"}, ContainerRuntime: "podman"},
+		// Non-allowlisted --config: protected, kill-manually reason.
+		{PID: 503, Argv: []string{"dolt", "sql-server", "--config", "/home/u/.dolt-real/config.yaml"}},
+	}
+
+	var stdout, stderr bytes.Buffer
+	opts := cleanupOptions{
+		Rigs:              []resolverRig{{Name: "hq", Path: "/city", HQ: true}},
+		FS:                fsys.NewFake(),
+		JSON:              true,
+		HomeDir:           "/home/u",
+		DiscoverProcesses: func() ([]DoltProcInfo, error) { return procs, nil },
+	}
+	code := runDoltCleanup(opts, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
+	}
+	var r CleanupReport
+	if err := json.Unmarshal(stdout.Bytes(), &r); err != nil {
+		t.Fatalf("Unmarshal: %v\nstdout: %s", err, stdout.String())
+	}
+
+	if len(r.Reaped.Targets) != 0 {
+		t.Fatalf("Reaped.Targets = %v, want none (100%%-protected population)", r.Reaped.Targets)
+	}
+	if r.Summary.ProtectedTotal != 3 {
+		t.Errorf("Summary.ProtectedTotal = %d, want 3", r.Summary.ProtectedTotal)
+	}
+	wantByKind := map[string]int{
+		"active-rig":        1,
+		"container:podman":  1,
+		"unreapable-config": 1,
+	}
+	if len(r.Summary.ProtectedByKind) != len(wantByKind) {
+		t.Fatalf("Summary.ProtectedByKind = %v, want %v", r.Summary.ProtectedByKind, wantByKind)
+	}
+	for kind, want := range wantByKind {
+		if got := r.Summary.ProtectedByKind[kind]; got != want {
+			t.Errorf("Summary.ProtectedByKind[%q] = %d, want %d (full: %v)", kind, got, want, r.Summary.ProtectedByKind)
+		}
 	}
 }
 
