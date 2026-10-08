@@ -57,9 +57,9 @@ func (r *FileRecorder) ListHistoryTail(ctx context.Context, filter Filter, limit
 //
 // Without count, the active log is scanned backward and the segments
 // newest-first, and the read stops once limit events are held. With count,
-// every source is read in seq order through a ring buffer of limit events.
-// Segments are merged by exact seq, so an archive and its not-yet-removed
-// rotating twin add nothing. limit must be positive.
+// the segments in seq order and then the active log are read through a ring
+// buffer of limit events. Segments are merged by exact seq, so an archive and
+// its not-yet-removed rotating twin add nothing. limit must be positive.
 func ReadFilteredHistoryTail(ctx context.Context, path string, filter Filter, limit int, count bool) ([]Event, int, error) {
 	if limit <= 0 {
 		return nil, 0, fmt.Errorf("history tail: limit %d is not positive", limit)
@@ -119,8 +119,11 @@ func newestHistory(ctx context.Context, path string, active activeLog, filter Fi
 	return out, len(out), nil
 }
 
-// countHistory reads every older segment and then the active log in seq order
-// through one ring buffer, counting all matches.
+// countHistory reads every older segment in seq order and then the active log
+// through one ring buffer, counting all matches. The ring drops a seq that is
+// not above the last one only while it reads the segments: the active log
+// starts above their windows, so its lines are taken in file order, as the
+// full scan takes them.
 func countHistory(ctx context.Context, path string, active activeLog, filter Filter, limit int) ([]Event, int, error) {
 	sources, err := olderSegments(ctx, path, active, filter.AfterSeq)
 	if err != nil {
@@ -143,6 +146,7 @@ func countHistory(ctx context.Context, path string, active activeLog, filter Fil
 		read[window] = struct{}{}
 	}
 	if active.f != nil {
+		ring.ascending = false
 		if err := readLinesInto(ctx, active.reader(), filter, ring); err != nil {
 			return nil, 0, err
 		}

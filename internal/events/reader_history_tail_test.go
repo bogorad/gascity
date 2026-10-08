@@ -304,6 +304,39 @@ func TestReadFilteredHistoryTailMergesOverlappingSegmentsByExactSeq(t *testing.T
 	}
 }
 
+// An active log that breaks seq order (written by hand, say) is read as the
+// full scan reads it, in both modes: every line in file order, each counted.
+// Only the segments, read before it with count, drop a repeated seq.
+func TestReadFilteredHistoryTailKeepsOutOfOrderActiveLines(t *testing.T) {
+	dir := t.TempDir()
+	writeHistoryArchive(t, dir, historyStamp(0), 1, 20)
+	path := filepath.Join(dir, "events.jsonl")
+	writeJSONLEvents(t, path, 21, 22, 25, 23, 24)
+	full, err := ReadFilteredWithInFlight(path, Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := append(seqRange(1, 22), 25, 23, 24); !reflect.DeepEqual(seqsOf(full), want) {
+		t.Fatalf("control: the full scan gives %v, want %v", seqsOf(full), want)
+	}
+	for _, limit := range []int{2, 4, 100} {
+		want := full
+		if len(want) > limit {
+			want = want[len(want)-limit:]
+		}
+		for _, count := range []bool{false, true} {
+			got, matched := historyTail(context.Background(), t, path, Filter{}, limit, count)
+			wantMatched := len(got)
+			if count {
+				wantMatched = len(full)
+			}
+			if !reflect.DeepEqual(seqsOf(got), seqsOf(want)) || matched != wantMatched {
+				t.Errorf("limit=%d count=%v: got %v (matched %d), want %v (matched %d)", limit, count, seqsOf(got), matched, seqsOf(want), wantMatched)
+			}
+		}
+	}
+}
+
 // Cancellation is observed at each point where the read can spend time. A
 // read that is not canceled would not return context.Canceled in any case
 // (in the first one it would read on to an archive that is not gzip).
