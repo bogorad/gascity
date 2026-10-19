@@ -1361,8 +1361,12 @@ func (o verifiedAckDrainOps) setDrainAck(sessionName string) error {
 	if err := o.drainOps.setDrainAck(sessionName); err != nil {
 		return err
 	}
-	if acked, err := o.isDrainAcked(sessionName); err != nil || !acked {
-		return fmt.Errorf("GC_DRAIN_ACK did not persist on session %q (verify: acked=%t err=%v); the runtime likely resolved a tmux server that does not host this session (TMUX_TMPDIR mismatch), seat handoff NOT complete", sessionName, acked, err)
+	acked, err := o.isDrainAcked(sessionName)
+	if err != nil {
+		return fmt.Errorf("GC_DRAIN_ACK did not persist on session %q (verify failed: %w); the runtime likely resolved a tmux server that does not host this session (TMUX_TMPDIR mismatch), seat handoff NOT complete", sessionName, err)
+	}
+	if !acked {
+		return fmt.Errorf("GC_DRAIN_ACK did not persist on session %q (verify: flag not set after write); the runtime likely resolved a tmux server that does not host this session (TMUX_TMPDIR mismatch), seat handoff NOT complete", sessionName)
 	}
 	return nil
 }
